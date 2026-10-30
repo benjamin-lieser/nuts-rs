@@ -1,7 +1,7 @@
 //! Drive a single sampling chain by wiring together the Hamiltonian, adaptation, and per-draw bookkeeping.
 
 use std::{
-    cell::{Ref, RefCell},
+    cell::{Ref, RefCell, RefMut},
     fmt::Debug,
     marker::PhantomData,
     ops::DerefMut,
@@ -39,6 +39,14 @@ pub trait Chain<M: Math>: SamplerStats<M> {
     fn expanded_draw(&mut self) -> Result<(Box<[f64]>, M::ExpandedVector, Self::Stats, Progress)>;
 
     fn math(&self) -> Ref<'_, M>;
+
+    /// Mutable access to the math backend, for example to change the posterior between draws.
+    fn math_mut(&self) -> RefMut<'_, M>;
+
+    /// Recompute the log density and gradient at the current position, keeping the step size,
+    /// the mass matrix and the adaptation state. Call this after changing the posterior through
+    /// `math_mut`, so that the next draw starts from a state consistent with the new posterior.
+    fn refresh_state(&mut self) -> Result<()>;
 }
 
 pub struct NutsChain<M, R, A>
@@ -210,6 +218,19 @@ where
     fn math(&self) -> Ref<'_, M> {
         self.math.borrow()
     }
+
+    fn math_mut(&self) -> RefMut<'_, M> {
+        self.math.borrow_mut()
+    }
+
+    fn refresh_state(&mut self) -> Result<()> {
+        let mut math_ = self.math.borrow_mut();
+        let math = math_.deref_mut();
+        let mut position = vec![0f64; math.dim()];
+        self.state.write_position(math, &mut position);
+        self.state = self.hamiltonian.init_state(math, &position)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, nuts_derive::Storable)]
@@ -281,5 +302,63 @@ impl<M: Math, R: rand::Rng, A: AdaptStrategy<M>> SamplerStats<M> for NutsChain<M
             divergence: (div_info, options.divergence, self.draw_count).into(),
             _phantom: PhantomData,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rand::{SeedableRng, rngs::StdRng};
+
+    use crate::{
+        Chain, DiagNutsSettings, math::CpuMath, math::test_logps::NormalLogp, sampler::Settings,
+    };
+
+    #[test]
+    fn refresh_state_keeps_adaptation() {
+        let ndim = 10;
+        let math = CpuMath::new(NormalLogp::new(ndim, 3.0));
+        let mut settings = DiagNutsSettings {
+            num_tune: 200,
+            num_draws: 400,
+            ..DiagNutsSettings::default()
+        };
+        settings.adapt_options.step_size_settings.jitter = None;
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut chain = settings.new_chain(0, math, &mut rng);
+        chain.set_position(&vec![0.0f64; ndim]).unwrap();
+
+        let mut step_size = 0.0;
+        for _ in 0..250 {
+            let (_, progress) = chain.draw().unwrap();
+            step_size = progress.step_size;
+        }
+
+        chain.math_mut().logp_func_mut().mu = -3.0;
+        chain.refresh_state().unwrap();
+
+        let mut sum = 0.0;
+        let mut count = 0;
+        for i in 0..150 {
+            let (draw, progress) = chain.draw().unwrap();
+            assert!(!progress.tuning);
+            assert_eq!(progress.step_size, step_size, "the step size changed");
+            if i >= 20 {
+                sum += draw.iter().sum::<f64>();
+                count += ndim;
+            }
+        }
+        let mean = sum / count as f64;
+        assert!((mean + 3.0).abs() < 0.3, "mean {mean} did not follow the new posterior");
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use crate::{DiagNutsSettings, math::CpuMath, math::test_logps::NormalLogp, sampler::Settings};
+
+    #[test]
+    fn nuts_chain_is_send() {
+        fn assert_send<T: Send>() {}
+        assert_send::<<DiagNutsSettings as Settings>::Chain<CpuMath<NormalLogp>>>();
     }
 }

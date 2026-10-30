@@ -12,7 +12,7 @@
 //! [BlackJAX](https://github.com/blackjax-devs/blackjax) implementation.
 
 use std::{
-    cell::{Ref, RefCell},
+    cell::{Ref, RefCell, RefMut},
     fmt::Debug,
     marker::PhantomData,
     ops::DerefMut,
@@ -565,6 +565,21 @@ where
 
     fn math(&self) -> Ref<'_, M> {
         self.math.borrow()
+    }
+
+    fn math_mut(&self) -> RefMut<'_, M> {
+        self.math.borrow_mut()
+    }
+
+    fn refresh_state(&mut self) -> Result<()> {
+        let mut math_ = self.math.borrow_mut();
+        let math = math_.deref_mut();
+        let mut position = vec![0f64; math.dim()];
+        self.state.write_position(math, &mut position);
+        self.state = self.hamiltonian.init_state(math, &position)?;
+        self.hamiltonian
+            .initialize_trajectory(math, &mut self.state, true, &mut self.rng)?;
+        Ok(())
     }
 }
 

@@ -38,6 +38,16 @@ impl<F: CpuLogpFunc> CpuMath<F> {
             lowrank_scratch: Col::zeros(0),
         }
     }
+
+    pub fn logp_func(&self) -> &F {
+        &self.logp_func
+    }
+
+    /// Mutable access to the log density, for example to change the posterior between draws.
+    /// Call `Chain::refresh_state` afterwards.
+    pub fn logp_func_mut(&mut self) -> &mut F {
+        &mut self.logp_func
+    }
 }
 
 #[non_exhaustive]

@@ -1,40 +1,39 @@
 //! Manage efficient allocation and reuse of phase-space points across tree expansion steps.
 
 use std::{
-    cell::RefCell,
     fmt::Debug,
-    rc::{Rc, Weak},
+    sync::{Arc, Mutex, Weak},
 };
 
 use crate::{dynamics::Point, math::Math};
 
 struct StateStorage<M: Math, P: Point<M>> {
-    free_states: RefCell<Vec<Rc<InnerStateReusable<M, P>>>>,
+    free_states: Mutex<Vec<Arc<InnerStateReusable<M, P>>>>,
 }
 
 impl<M: Math, P: Point<M>> StateStorage<M, P> {
     fn new(_math: &mut M, capacity: usize) -> StateStorage<M, P> {
         StateStorage {
-            free_states: RefCell::new(Vec::with_capacity(capacity)),
+            free_states: Mutex::new(Vec::with_capacity(capacity)),
         }
     }
 }
 
 pub struct StatePool<M: Math, P: Point<M>> {
-    storage: Rc<StateStorage<M, P>>,
+    storage: Arc<StateStorage<M, P>>,
 }
 
 impl<M: Math, P: Point<M>> StatePool<M, P> {
     pub fn new(math: &mut M, capacity: usize) -> StatePool<M, P> {
         StatePool {
-            storage: Rc::new(StateStorage::new(math, capacity)),
+            storage: Arc::new(StateStorage::new(math, capacity)),
         }
     }
 
     pub fn new_state(&self, math: &mut M) -> State<M, P> {
-        let inner = match self.storage.free_states.borrow_mut().pop() {
+        let inner = match self.storage.free_states.lock().unwrap().pop() {
             Some(inner) => inner,
-            None => Rc::new(InnerStateReusable::new(math, self)),
+            None => Arc::new(InnerStateReusable::new(math, self)),
         };
         State {
             inner: std::mem::ManuallyDrop::new(inner),
@@ -60,13 +59,13 @@ impl<M: Math, P: Point<M>> InnerStateReusable<M, P> {
     fn new(math: &mut M, owner: &StatePool<M, P>) -> InnerStateReusable<M, P> {
         InnerStateReusable {
             inner: P::new(math),
-            reuser: Rc::downgrade(&Rc::clone(&owner.storage)),
+            reuser: Arc::downgrade(&Arc::clone(&owner.storage)),
         }
     }
 }
 
 pub struct State<M: Math, P: Point<M>> {
-    inner: std::mem::ManuallyDrop<Rc<InnerStateReusable<M, P>>>,
+    inner: std::mem::ManuallyDrop<Arc<InnerStateReusable<M, P>>>,
 }
 
 #[derive(Debug)]
@@ -80,7 +79,7 @@ impl<M: Math, P: Point<M>> State<M, P> {
     }
 
     pub fn try_point_mut(&mut self) -> Result<&mut P> {
-        match Rc::get_mut(&mut self.inner) {
+        match Arc::get_mut(&mut self.inner) {
             Some(val) => Ok(&mut val.inner),
             None => Err(StateInUse {}),
         }
@@ -106,11 +105,11 @@ impl<M: Math, P: Point<M>> State<M, P> {
 impl<M: Math, P: Point<M>> Drop for State<M, P> {
     fn drop(&mut self) {
         let rc = unsafe { std::mem::ManuallyDrop::take(&mut self.inner) };
-        if (Rc::strong_count(&rc) == 1)
-            && (Rc::weak_count(&rc) == 0)
+        if (Arc::strong_count(&rc) == 1)
+            && (Arc::weak_count(&rc) == 0)
             && let Some(storage) = rc.reuser.upgrade()
         {
-            storage.free_states.borrow_mut().push(rc);
+            storage.free_states.lock().unwrap().push(rc);
         }
     }
 }
